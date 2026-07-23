@@ -1437,19 +1437,19 @@ const Streamlit = {
   init() {
     window.addEventListener('message', (event) => {
       const msg = event.data;
-      if (!msg || !msg.type) return;
+      if (!msg || !msg.isStreamlitMessage || !msg.type) return;
       if (msg.type === 'streamlit:render') {
         _onStreamlitRender(msg.args || {});
       }
     });
-    window.parent.postMessage({ type: 'streamlit:componentReady', apiVersion: 1 }, '*');
+    window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1 }, '*');
     Streamlit.setFrameHeight(950);
   },
   setFrameHeight(height) {
-    window.parent.postMessage({ type: 'streamlit:setFrameHeight', height }, '*');
+    window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height }, '*');
   },
   setComponentValue(value) {
-    window.parent.postMessage({ type: 'streamlit:setComponentValue', value, dataType: 'json' }, '*');
+    window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setComponentValue', value, dataType: 'json' }, '*');
   },
 };
 
