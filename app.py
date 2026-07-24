@@ -65,31 +65,6 @@ def gh_load():
     return raw, payload["sha"], None
 
 
-def gh_save(data_str, sha):
-    """Returns (new_sha_or_None, error_message_or_None)."""
-    body = {
-        "message": "Update inventory data via Controller Hub",
-        "content": base64.b64encode(data_str.encode("utf-8")).decode("ascii"),
-        "branch": "main",
-    }
-    if sha:
-        body["sha"] = sha
-    status, payload = _gh_request("PUT", body)
-    if status < 200 or status >= 300:
-        return None, f"{status}: {payload.get('message', 'unknown error')}"
-    return payload["content"]["sha"], None
-
-
-def gh_delete(sha):
-    if not sha:
-        return True, None
-    body = {"message": "Reset inventory data via Controller Hub", "sha": sha, "branch": "main"}
-    status, payload = _gh_request("DELETE", body)
-    if status < 200 or status >= 300:
-        return False, f"{status}: {payload.get('message', 'unknown error')}"
-    return True, None
-
-
 # ── GitHub에서 읽은 데이터를 st.session_state에 캐시 (세션당 1회) ──
 # 쿼리 파라미터 ?refresh=1 로 강제 재조회 가능
 force_refresh = st.query_params.get("refresh") == "1"
@@ -106,11 +81,15 @@ if "gh_loaded" not in st.session_state or force_refresh:
 data = st.session_state["gh_data"]
 err = st.session_state["gh_error"]
 
-# ── 세션 캐시된 데이터를 HTML에 직접 JSON으로 주입 (bidirectional 컴포넌트 없음) ──
+# ── 세션 캐시된 데이터 + GitHub 토큰을 HTML에 직접 주입 (bidirectional 컴포넌트 없음) ──
+# 저장/초기화는 클라이언트 JS가 GitHub API를 직접 호출 — 토큰이 브라우저에 노출됨.
+# 반드시 이 저장소 하나에만 Contents 쓰기 권한을 가진 fine-grained 토큰을 사용할 것.
 with open(FRONTEND_HTML_PATH, "r", encoding="utf-8") as f:
     html = f.read()
 
 html = html.replace("__INITIAL_DATA_JSON__", json.dumps(data))
 html = html.replace("__LOAD_ERROR__", json.dumps(err))
+html = html.replace("__GITHUB_TOKEN__", GH_TOKEN)
+html = html.replace("__GITHUB_REPO__", GH_REPO)
 
 components.html(html, height=950, scrolling=True)
