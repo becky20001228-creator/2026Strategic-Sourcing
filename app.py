@@ -22,7 +22,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-FRONTEND_HTML_PATH = os.path.join(os.path.dirname(__file__), "frontend", "index.html")
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "frontend")
+_controller_hub = components.declare_component("controller_hub", path=FRONTEND_DIR)
 
 # ── GitHub API 설정 (토큰은 서버 쪽에만 존재, 클라이언트로 전달되지 않음) ──
 GH_TOKEN = st.secrets["github"]["token"]
@@ -90,46 +91,60 @@ def gh_delete(sha):
     return True, None
 
 
-# ── 저장/초기화는 URL 쿼리 파라미터로 전달됨 (저장 버튼 클릭 시 전체 페이지 재이동) ──
-hub_action = st.query_params.get("hub_action")
-hub_payload = st.query_params.get("hub_payload")
-if hub_action in ("save", "reset"):
+# ── 세션당 1회만 GitHub에서 로드 (이후에는 세션 상태 캐시 사용) ──
+# 쿼리 파라미터 ?refresh=1 로 강제 재조회 가능 (세션이 오래돼 캐시가 stale할 때 대비)
+force_refresh = st.query_params.get("refresh") == "1"
+if force_refresh:
     st.query_params.clear()
 
-action_result = None
-data = None
-sha = None
-err = None
-
-if hub_action == "save" and hub_payload:
-    _, current_sha, _ = gh_load()
-    new_sha, save_err = gh_save(hub_payload, current_sha)
-    if save_err and save_err.startswith("409"):
-        # SHA가 오래됨 — 최신 SHA로 한 번만 재시도
-        _, retry_sha, _ = gh_load()
-        new_sha, save_err = gh_save(hub_payload, retry_sha)
-    if save_err:
-        action_result = {"ok": False, "type": "save", "message": save_err}
-        data, sha, err = gh_load()
-    else:
-        action_result = {"ok": True, "type": "save"}
-        data, sha = hub_payload, new_sha
-
-elif hub_action == "reset":
-    _, current_sha, _ = gh_load()
-    ok, del_err = gh_delete(current_sha)
-    action_result = {"ok": ok, "type": "reset"}
-    if del_err:
-        action_result["message"] = del_err
-
-else:
+if "gh_loaded" not in st.session_state or force_refresh:
     data, sha, err = gh_load()
+    st.session_state["gh_data"] = data
+    st.session_state["gh_sha"] = sha
+    st.session_state["gh_error"] = err
+    st.session_state["gh_loaded"] = True
 
-with open(FRONTEND_HTML_PATH, "r", encoding="utf-8") as f:
-    html = f.read()
+if "last_processed_nonce" not in st.session_state:
+    st.session_state["last_processed_nonce"] = None
+if "action_result" not in st.session_state:
+    st.session_state["action_result"] = None
 
-html = html.replace("__INITIAL_DATA_JSON__", json.dumps(data))
-html = html.replace("__LOAD_ERROR__", json.dumps(err))
-html = html.replace("__ACTION_RESULT_JSON__", json.dumps(action_result))
+value = _controller_hub(
+    initial_data=st.session_state["gh_data"],
+    load_error=st.session_state["gh_error"],
+    action_result=st.session_state["action_result"],
+    key="controller_hub",
+    default=None,
+)
 
-components.html(html, height=950, scrolling=True)
+if (
+    value
+    and isinstance(value, dict)
+    and value.get("nonce")
+    and value.get("nonce") != st.session_state["last_processed_nonce"]
+):
+    action = value.get("action")
+    nonce = value.get("nonce")
+    st.session_state["last_processed_nonce"] = nonce
+
+    if action == "save":
+        payload_str = value.get("payload", "")
+        new_sha, err = gh_save(payload_str, st.session_state["gh_sha"])
+        if err and err.startswith("409"):
+            # SHA가 오래됨 — 최신 SHA로 한 번만 재시도
+            _, fresh_sha, _ = gh_load()
+            new_sha, err = gh_save(payload_str, fresh_sha)
+        if err:
+            st.session_state["action_result"] = {"ok": False, "nonce": nonce, "message": err}
+        else:
+            st.session_state["gh_sha"] = new_sha
+            st.session_state["gh_data"] = payload_str
+            st.session_state["action_result"] = {"ok": True, "nonce": nonce}
+
+    elif action == "reset":
+        ok, err = gh_delete(st.session_state["gh_sha"])
+        st.session_state["gh_sha"] = None
+        st.session_state["gh_data"] = None
+        st.session_state["action_result"] = {"ok": ok, "nonce": nonce, "message": err}
+
+    st.rerun()
