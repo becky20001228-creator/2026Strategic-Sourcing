@@ -65,7 +65,6 @@ def gh_load():
     return raw, payload["sha"], None
 
 
-# gh_save / gh_delete는 저장 기능을 다시 연결할 때 사용 (현재 프런트엔드는 읽기 전용)
 def gh_save(data_str, sha):
     """Returns (new_sha_or_None, error_message_or_None)."""
     body = {
@@ -91,13 +90,46 @@ def gh_delete(sha):
     return True, None
 
 
-# ── 페이지 렌더마다 GitHub에서 최신 데이터를 읽어와 HTML에 직접 주입 ──
-data, sha, err = gh_load()
+# ── 저장/초기화는 URL 쿼리 파라미터로 전달됨 (저장 버튼 클릭 시 전체 페이지 재이동) ──
+hub_action = st.query_params.get("hub_action")
+hub_payload = st.query_params.get("hub_payload")
+if hub_action in ("save", "reset"):
+    st.query_params.clear()
+
+action_result = None
+data = None
+sha = None
+err = None
+
+if hub_action == "save" and hub_payload:
+    _, current_sha, _ = gh_load()
+    new_sha, save_err = gh_save(hub_payload, current_sha)
+    if save_err and save_err.startswith("409"):
+        # SHA가 오래됨 — 최신 SHA로 한 번만 재시도
+        _, retry_sha, _ = gh_load()
+        new_sha, save_err = gh_save(hub_payload, retry_sha)
+    if save_err:
+        action_result = {"ok": False, "type": "save", "message": save_err}
+        data, sha, err = gh_load()
+    else:
+        action_result = {"ok": True, "type": "save"}
+        data, sha = hub_payload, new_sha
+
+elif hub_action == "reset":
+    _, current_sha, _ = gh_load()
+    ok, del_err = gh_delete(current_sha)
+    action_result = {"ok": ok, "type": "reset"}
+    if del_err:
+        action_result["message"] = del_err
+
+else:
+    data, sha, err = gh_load()
 
 with open(FRONTEND_HTML_PATH, "r", encoding="utf-8") as f:
     html = f.read()
 
 html = html.replace("__INITIAL_DATA_JSON__", json.dumps(data))
 html = html.replace("__LOAD_ERROR__", json.dumps(err))
+html = html.replace("__ACTION_RESULT_JSON__", json.dumps(action_result))
 
 components.html(html, height=950, scrolling=True)
