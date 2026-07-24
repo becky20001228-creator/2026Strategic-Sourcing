@@ -597,6 +597,9 @@ th.sortable{cursor:pointer;}
   <div class="gh-spinner-text">GitHub에 저장 중...</div>
 </div>
 
+<!-- Streamlit 연결 상태 표시 -->
+<div id="hub-conn-status" style="display:none;position:fixed;bottom:10px;right:10px;z-index:99999;font-size:12px;font-weight:600;padding:6px 12px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.2);font-family:-apple-system,'Malgun Gothic','맑은 고딕',sans-serif;"></div>
+
 <!-- Row Add/Edit Modal -->
 <div class="modal-overlay" id="row-modal">
   <div class="modal">
@@ -814,10 +817,6 @@ let sortDir = null;   // 'asc' | 'desc' | null
 // PERSISTENCE  (GitHub API — Python이 처리, 토큰은 클라이언트에 없음)
 // ═══════════════════════════════════════════════
 
-const INITIAL_DATA_JSON = __INITIAL_DATA_JSON__;
-const LOAD_ERROR = __LOAD_ERROR__;
-const ACTION_RESULT_JSON = __ACTION_RESULT_JSON__;
-
 function _applyRemoteData(rawStr) {
   if (!rawStr) return;
   try {
@@ -872,17 +871,9 @@ function hideSaveSpinner() {
   if (el) el.classList.remove('open');
 }
 
-// ── 저장/초기화: URL 쿼리 파라미터로 전달 후 전체 페이지 재이동 → Python이 처리 ──
-const SAVE_PAYLOAD_LIMIT = 6000; // encodeURIComponent 기준 대략적인 안전 길이
+let _saveQueue = Promise.resolve();
 
-function _navigateWithAction(action, extraParams) {
-  const base = window.top.location.origin + window.top.location.pathname;
-  const params = new URLSearchParams();
-  params.set('hub_action', action);
-  Object.keys(extraParams || {}).forEach(k => params.set(k, extraParams[k]));
-  window.top.location.href = base + '?' + params.toString();
-}
-
+// ══ 통합 저장: 모든 데이터를 Python에 전달 → Python이 GitHub API 호출 ══
 function saveAll() {
   const obj = {
     // 컨트롤러
@@ -902,27 +893,39 @@ function saveAll() {
     // 가이드
     acctGuides, erpGuides,
   };
-  const payload = JSON.stringify(obj);
-  const estSize = encodeURIComponent(payload).length;
-  if (estSize > SAVE_PAYLOAD_LIMIT) {
-    alert('⚠️ 저장할 데이터가 너무 큽니다 (약 ' + estSize + '자). 관리자에게 문의해 주세요.');
-    return;
-  }
-  showSaveSpinner('GitHub에 저장 중... (페이지가 새로고침됩니다)');
-  _navigateWithAction('save', { hub_payload: payload });
+  // 저장 요청을 큐에 직렬화 — 동시 저장 시 충돌 방지
+  _saveQueue = _saveQueue.then(() => _doSave(obj)).catch(e => {
+    console.error('[Hub] saveAll 실패:', e.message);
+    alert('⚠️ 저장 실패: ' + e.message);
+  });
+  return _saveQueue;
+}
+
+function _doSave(obj) {
+  showSaveSpinner('GitHub에 저장 중...');
+  return _ghAction('save', { payload: JSON.stringify(obj) }).finally(hideSaveSpinner);
 }
 
 function saveData() { return saveAll(); }
 
-// ── 로드는 페이지 렌더 시 Python이 초기 데이터로 이미 주입 (INITIAL_DATA_JSON 참고) ──
-function loadAll() { /* no-op: 데이터는 초기 페이지 렌더 시 이미 적용됨 */ }
+// ── 로드는 Streamlit 최초 렌더 시 Python이 args로 전달 (_onStreamlitRender 참고) ──
+function loadAll() { /* no-op: 데이터는 Streamlit 렌더 args로 전달됨 */ }
 function loadData() { return loadAll(); }
 
-function resetData() {
+async function resetData() {
   if (!settingsUnlocked) { requirePassword(function(){ resetData(); }); return; }
   if (!confirm('모든 데이터를 초기값으로 되돌리시겠습니까?\n저장된 변경사항이 모두 삭제됩니다.')) return;
-  showSaveSpinner('초기화 중... (페이지가 새로고침됩니다)');
-  _navigateWithAction('reset', {});
+  showSaveSpinner('초기화 중...');
+  try {
+    await _ghAction('reset', {});
+  } catch(e) {
+    console.warn('[Hub] 원격 초기화 실패:', e.message);
+    alert('⚠️ 초기화 실패: ' + e.message);
+    hideSaveSpinner();
+    return;
+  }
+  hideSaveSpinner();
+  location.reload();
 }
 
 // ═══════════════════════════════════════════════
@@ -1432,42 +1435,117 @@ function renderAssembly() {
   tbody.innerHTML = html.join('');
 }
 
-// ── 페이지 초기 렌더 시 Python이 주입한 데이터 적용 ──
-function _applyInitialData() {
-  if (LOAD_ERROR) {
-    console.warn('[Hub] 초기 로드 실패:', LOAD_ERROR);
-    alert('⚠️ 초기 데이터 로드 실패: ' + LOAD_ERROR);
-  }
-  if (ACTION_RESULT_JSON) {
-    const ar = ACTION_RESULT_JSON;
-    if (ar.ok) {
-      if (ar.type === 'save') alert('✅ 저장되었습니다.');
-      else if (ar.type === 'reset') alert('✅ 초기화되었습니다.');
-    } else {
-      const label = ar.type === 'reset' ? '초기화' : '저장';
-      alert('⚠️ ' + label + ' 실패: ' + (ar.message || '알 수 없는 오류'));
-    }
-  }
-  _applyRemoteData(INITIAL_DATA_JSON);
-  try { refresh(); } catch(e) { console.warn('[Hub] refresh 실패:', e.message); }
-  try { renderCompanyTable(); } catch(e) { console.warn('[Hub] renderCompanyTable 실패:', e.message); }
-  try { switchAcctGuideTab(activeAcctGuide); } catch(e) { console.warn('[Hub] acctGuide 실패:', e.message); }
-  try { switchErpGuideTab(activeErpGuide); } catch(e) { console.warn('[Hub] erpGuide 실패:', e.message); }
+// ── Streamlit Components 브리지 (raw postMessage protocol, 토큰은 Python에만 존재) ──
+const Streamlit = {
+  init() {
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      if (!msg || !msg.isStreamlitMessage || !msg.type) return;
+      if (msg.type === 'streamlit:render') {
+        _onStreamlitRender(msg.args || {});
+      }
+    });
+    _showConnStatus('Streamlit 연결 확인 중...', 'pending');
+    _connTimeoutTimer = setTimeout(() => {
+      if (!_hubBooted) {
+        _showConnStatus('⚠️ Streamlit 연결 실패 — 새로고침 해주세요', 'error', true);
+        console.warn('[Hub] componentReady 응답 없음 (timeout)');
+      }
+    }, 8000);
+    window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1 }, '*');
+    Streamlit.setFrameHeight(950);
+  },
+  setFrameHeight(height) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height }, '*');
+  },
+  setComponentValue(value) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setComponentValue', value, dataType: 'json' }, '*');
+  },
+};
 
-  // Modal overlay close handlers
-  ['contact-col-modal','contact-row-modal','meeting-modal','mail-add-modal','row-modal','col-modal'].forEach(id => {
-    try {
-      const el = document.getElementById(id);
-      if (el) el.addEventListener('click', function(e){ if(e.target===this) this.classList.remove('open'); });
-    } catch(e) { console.warn('[Hub] 저장 실패:', e.message); }
+let _hubBooted = false;
+let _pendingNonce = null;
+let _pendingResolve = null;
+let _pendingReject = null;
+let _pendingTimer = null;
+let _connTimeoutTimer = null;
+
+function _showConnStatus(text, kind, sticky) {
+  const el = document.getElementById('hub-conn-status');
+  if (!el) return;
+  const colors = {
+    pending: ['#fff3cd', '#856404'],
+    ok:      ['#d4edda', '#155724'],
+    error:   ['#f8d7da', '#721c24'],
+  };
+  const [bg, fg] = colors[kind] || colors.pending;
+  el.style.background = bg;
+  el.style.color = fg;
+  el.textContent = text;
+  el.style.display = 'block';
+  if (!sticky) {
+    clearTimeout(el._hideTimer);
+    el._hideTimer = setTimeout(() => { el.style.display = 'none'; }, 2500);
+  }
+}
+
+function _makeNonce() { return Date.now() + '-' + Math.random().toString(36).slice(2); }
+
+function _ghAction(action, extra) {
+  return new Promise((resolve, reject) => {
+    const nonce = _makeNonce();
+    _pendingNonce = nonce;
+    _pendingResolve = resolve;
+    _pendingReject = reject;
+    clearTimeout(_pendingTimer);
+    _pendingTimer = setTimeout(() => {
+      if (_pendingNonce === nonce) {
+        _pendingNonce = null; _pendingResolve = null; _pendingReject = null;
+        reject(new Error('시간 초과 (Streamlit 응답 없음)'));
+      }
+    }, 20000);
+    Streamlit.setComponentValue(Object.assign({ action, nonce }, extra));
   });
+}
 
-  try { switchTab('home'); } catch(e) { console.warn('[Hub] switchTab home 실패:', e.message); }
-  try { tickClock(); setInterval(tickClock, 1000); } catch(e) { console.warn('[Hub] 저장 실패:', e.message); }
+function _onStreamlitRender(args) {
+  const ar = args.action_result;
+  if (ar && ar.nonce === _pendingNonce) {
+    clearTimeout(_pendingTimer);
+    const resolve = _pendingResolve, reject = _pendingReject;
+    _pendingNonce = null; _pendingResolve = null; _pendingReject = null;
+    if (ar.ok) { resolve(ar); } else { reject(new Error(ar.message || '요청 실패')); }
+  }
+
+  if (!_hubBooted) {
+    _hubBooted = true;
+    clearTimeout(_connTimeoutTimer);
+    _showConnStatus('✅ Streamlit 연결됨', 'ok');
+    if (args.load_error) {
+      console.warn('[Hub] 초기 로드 실패:', args.load_error);
+      alert('⚠️ 초기 데이터 로드 실패: ' + args.load_error);
+    }
+    _applyRemoteData(args.initial_data);
+    try { refresh(); } catch(e) { console.warn('[Hub] refresh 실패:', e.message); }
+    try { renderCompanyTable(); } catch(e) { console.warn('[Hub] renderCompanyTable 실패:', e.message); }
+    try { switchAcctGuideTab(activeAcctGuide); } catch(e) { console.warn('[Hub] acctGuide 실패:', e.message); }
+    try { switchErpGuideTab(activeErpGuide); } catch(e) { console.warn('[Hub] erpGuide 실패:', e.message); }
+
+    // Modal overlay close handlers
+    ['contact-col-modal','contact-row-modal','meeting-modal','mail-add-modal','row-modal','col-modal'].forEach(id => {
+      try {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('click', function(e){ if(e.target===this) this.classList.remove('open'); });
+      } catch(e) { console.warn('[Hub] 저장 실패:', e.message); }
+    });
+
+    try { switchTab('home'); } catch(e) { console.warn('[Hub] switchTab home 실패:', e.message); }
+    try { tickClock(); setInterval(tickClock, 1000); } catch(e) { console.warn('[Hub] 저장 실패:', e.message); }
+  }
 }
 
 window.onload = () => {
-  _applyInitialData();
+  Streamlit.init();
 };
 function tickClock() {
   const el = document.getElementById('clock');
