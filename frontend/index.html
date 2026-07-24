@@ -569,6 +569,8 @@ th.sortable{cursor:pointer;}
           </div>
         </div>
       </div>
+
+      <button class="btn btn-primary" id="settings-save-btn" onclick="manualSaveClick()" style="position:fixed;bottom:20px;right:20px;z-index:500;box-shadow:0 2px 10px rgba(0,0,0,.25);padding:10px 22px;font-size:13px;">💾 저장</button>
     </div>
 
   </main>
@@ -811,11 +813,37 @@ let sortKey = null;   // column key being sorted
 let sortDir = null;   // 'asc' | 'desc' | null
 
 // ═══════════════════════════════════════════════
-// PERSISTENCE  (GitHub API — Python이 처리, 토큰은 클라이언트에 없음)
+// PERSISTENCE  (로드: Python이 주입 / 저장·초기화: 클라이언트가 GitHub API 직접 호출)
 // ═══════════════════════════════════════════════
 
 const INITIAL_DATA_JSON = __INITIAL_DATA_JSON__;
 const LOAD_ERROR = __LOAD_ERROR__;
+const GH_TOKEN = "__GITHUB_TOKEN__";
+const GH_REPO  = "__GITHUB_REPO__";
+const GH_PATH  = "data/inventory.json";
+const GH_API   = "https://api.github.com/repos/" + GH_REPO + "/contents/" + GH_PATH;
+
+function _ghHeaders() {
+  return {
+    'Authorization': 'Bearer ' + GH_TOKEN,
+    'Accept': 'application/vnd.github+json',
+  };
+}
+
+function _b64EncodeUtf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  bytes.forEach(b => binary += String.fromCharCode(b));
+  return btoa(binary);
+}
+
+async function _getCurrentSha() {
+  const res = await fetch(GH_API + '?ref=main', { headers: _ghHeaders() });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error('SHA 조회 실패 (' + res.status + ')');
+  const json = await res.json();
+  return json.sha;
+}
 
 function _applyRemoteData(rawStr) {
   if (!rawStr) return;
@@ -871,21 +899,106 @@ function hideSaveSpinner() {
   if (el) el.classList.remove('open');
 }
 
-// ── 저장/초기화는 현재 서버 연동 준비 중 ──
+let _saveQueue = Promise.resolve();
+
+// ══ 통합 저장: 모든 데이터를 GitHub에 직접 저장 ══
 function saveAll() {
-  alert('⚠️ 저장 기능은 현재 점검 중입니다.\n변경사항이 GitHub에 저장되지 않습니다.');
-  return Promise.resolve();
+  const obj = {
+    // 컨트롤러
+    controllers, columns, nextId,
+    // 업체정보
+    contacts, contactColumns, nextContactId,
+    companyData, companyColumns, nextCompanyId,
+    etcData, etcColumns, nextEtcId,
+    acctData, acctColumns, nextAcctId,
+    erpsysData, erpsysColumns, nextErpsysId,
+    // 발주
+    orderData, orderColumns, nextOrderId,
+    // Meeting
+    meetingData, nextMeetingId,
+    // 메일
+    mailTemplates, nextMailId,
+    // 가이드
+    acctGuides, erpGuides,
+  };
+  // 저장 요청을 큐에 직렬화 — 동시 저장 시 SHA 충돌 방지
+  const p = _saveQueue.then(() => _doSave(obj));
+  _saveQueue = p.catch(() => {}); // 큐 자체는 실패해도 다음 저장을 위해 계속 진행
+  return p.catch(e => {
+    console.error('[Hub] saveAll 실패:', e.message);
+    alert('⚠️ 저장 실패: ' + e.message);
+    throw e;
+  });
+}
+
+async function _doSave(obj, isRetry) {
+  showSaveSpinner('GitHub에 저장 중...');
+  try {
+    const sha = await _getCurrentSha();
+    const str = JSON.stringify(obj);
+    const body = {
+      message: 'Update inventory data (' + new Date().toISOString() + ')',
+      content: _b64EncodeUtf8(str),
+      branch: 'main',
+    };
+    if (sha) body.sha = sha;
+    const res = await fetch(GH_API, {
+      method: 'PUT',
+      headers: Object.assign({'Content-Type': 'application/json'}, _ghHeaders()),
+      body: JSON.stringify(body),
+    });
+    if (res.status === 409 && !isRetry) {
+      return _doSave(obj, true);
+    }
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error('GitHub 저장 실패 (' + res.status + '): ' + errText);
+    }
+  } finally {
+    hideSaveSpinner();
+  }
 }
 
 function saveData() { return saveAll(); }
+
+// 설정 화면 우측 하단 저장 버튼 전용: 성공 시에만 완료 안내 표시 (실패 알림은 saveAll 내부에서 처리)
+async function manualSaveClick() {
+  try {
+    await saveAll();
+    alert('✅ 저장되었습니다.');
+  } catch(e) {
+    // 실패 알림은 saveAll()이 이미 표시함
+  }
+}
 
 // ── 로드는 페이지 렌더 시 Python이 초기 데이터로 이미 주입 (INITIAL_DATA_JSON 참고) ──
 function loadAll() { /* no-op: 데이터는 초기 페이지 렌더 시 이미 적용됨 */ }
 function loadData() { return loadAll(); }
 
-function resetData() {
+async function resetData() {
   if (!settingsUnlocked) { requirePassword(function(){ resetData(); }); return; }
-  alert('⚠️ 초기화 기능은 현재 점검 중입니다.\nGitHub 데이터가 변경되지 않습니다.');
+  if (!confirm('모든 데이터를 초기값으로 되돌리시겠습니까?\n저장된 변경사항이 모두 삭제됩니다.')) return;
+  showSaveSpinner('초기화 중...');
+  try {
+    const sha = await _getCurrentSha();
+    if (sha) {
+      const res = await fetch(GH_API, {
+        method: 'DELETE',
+        headers: Object.assign({'Content-Type': 'application/json'}, _ghHeaders()),
+        body: JSON.stringify({ message: 'Reset inventory data', sha: sha, branch: 'main' }),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error('GitHub 초기화 실패 (' + res.status + '): ' + errText);
+      }
+    }
+    hideSaveSpinner();
+    location.reload();
+  } catch(e) {
+    hideSaveSpinner();
+    console.warn('[Hub] 원격 초기화 실패:', e.message);
+    alert('⚠️ 초기화 실패: ' + e.message);
+  }
 }
 
 // ═══════════════════════════════════════════════
