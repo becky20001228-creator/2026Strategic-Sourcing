@@ -92,7 +92,12 @@ def gh_delete(sha):
 
 
 # ── 세션당 1회만 GitHub에서 로드 (이후에는 세션 상태 캐시 사용) ──
-if "gh_loaded" not in st.session_state:
+# 쿼리 파라미터 ?refresh=1 로 강제 재조회 가능 (세션이 오래돼 캐시가 stale할 때 대비)
+force_refresh = st.query_params.get("refresh") == "1"
+if force_refresh:
+    st.query_params.clear()
+
+if "gh_loaded" not in st.session_state or force_refresh:
     data, sha, err = gh_load()
     st.session_state["gh_data"] = data
     st.session_state["gh_sha"] = sha
